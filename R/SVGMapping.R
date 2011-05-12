@@ -24,6 +24,14 @@
 
 load("inst/extdata/microarrayColors.rda")
 
+svgNS <- "http://www.w3.org/2000/svg"
+
+completeNamespaces <- function(svgdata) {
+  NS <- xmlNamespaceDefinitions(svgdata, simplify=TRUE)
+  NS[["svg"]] <- svgNS
+  return(NS)
+}
+
 computeExprColors <- function(X, col=microarrayColors, NA.color="#999999", a=-2, b=2) {
   satval <- 2
   n <- length(col)
@@ -89,12 +97,62 @@ getLabelsSVG <- function(svg, what="*", geneAttribute="inkscape:label") {
   return(labels)
 }
 
+setTextSVG <- function(svg, searchAttributeValue, text, searchAttribute="inkscape:label") {
+  nodes <- getNodeSet(svg, paste("//svg:text[@", searchAttribute, "]", sep=""), namespaces=completeNamespaces(svg))
+  for (node in nodes) {
+    attval <- getAttributeSVG(node, searchAttribute)
+    if (attval == searchAttributeValue) {
+      # If the text node has a tspan child, add the text in the tspan child
+      for (child in xmlChildren(node)) {
+        if (xmlName(child) == "tspan") {
+          node <- child
+          break
+        }
+      }
+      # Remove previous text
+      removeChildren(node, kids=1)
+      # Add user-supplied text
+      addChildren(node, text)
+    }
+  }
+}
+
+addLinkSVG <- function(node, url) {
+  a <- newXMLNode("a", attrs=list("xlink:href"=url, target="_blank"), .children=list(node), namespaceDefinitions=c(xlink="http://www.w3.org/1999/xlink"))
+  a <- addSibling(node, a)[[1]]
+  removeNodes(node)
+  new.node <- xmlChildren(a)[[1]]
+  return(new.node)
+}
+
+addLinkByLabelSVG <- function(svg, searchAttributeValue, url, what="*", searchAttribute = "inkscape:label") {
+  nodes <- getNodeSet(svg, paste("//", what, "[@", searchAttribute, "]", sep=""))
+  for (node in nodes) {
+      attval <- getAttributeSVG(node, searchAttribute)
+      if (attval == searchAttributeValue) {
+          addLinkSVG(node, url)
+      }
+  }
+  invisible(NULL)
+}
+
+addJavaScriptCallBack <- function(node, attribute, call) {
+  originalCall <- getAttributeSVG(node, attribute)
+  if (is.null(originalCall)) {
+    newCall <- call
+  } else {
+    newCall <- paste(originalCall, call, sep="; ")
+  }
+  setAttributeSVG(node, attribute, newCall)
+}
 
 mapDataSVG <- function(svg, numData, tooltipData=numData,
                        mode="fill", what="*",
                        geneAttribute="inkscape:label",
                        col=microarrayColors, NA.color="#999999", colrange=c(-2,2),
-                       annotation=NULL, fillAngle=NULL) {
+                       annotation=NULL,
+                       fillAngle=NULL, pieStartAngle=NULL, pieClockwise=TRUE,
+                       animations=TRUE) {
   numData <- as.matrix(numData)
   if (ncol(numData) < 1) stop("numData must contain at least one column")
   if (! (mode %in% c("fill", "stroke", "pie", "tooltip-only"))) {
@@ -124,7 +182,7 @@ mapDataSVG <- function(svg, numData, tooltipData=numData,
   } else if (is.function(annotation)) {
     annotFunction <- annotation
   } else if (is.matrix(annotation) || is.data.frame(annotation)) {
-                                        # annotation is a matrix/data.frame
+    ## annotation is a matrix/data.frame
     annotFunction <- function(x) {
       if (x %in% rownames(annotation)) {
         return(as.list(annotation[x,]))
@@ -148,7 +206,7 @@ mapDataSVG <- function(svg, numData, tooltipData=numData,
     }
     return(sapply(v, f))
   }
-  addToolTip <- if (is.null(tooltipData)) function(...) { NULL } else function(node, gene, geneColors) {
+  addToolTip <- if (is.null(tooltipData)) function(node, ...) { return(node) } else function(node, gene, geneColors) {
     displayedFoldChanges <- tooltipData[gene,]
     displayedFoldChanges <- as.character(displayedFoldChanges)
     displayedFoldChanges[is.na(displayedFoldChanges)] <- "NA"
@@ -159,29 +217,29 @@ mapDataSVG <- function(svg, numData, tooltipData=numData,
     jsargs[[3]] <- addquotes(if (!is.null(annot) && !is.null(annot$description)) annot$description else "null")
     jsargs[[4]] <- paste("new Array(", paste(addquotes(displayedFoldChanges), collapse=","), ")", sep="")
     jsargs[[5]] <- paste("new Array(", paste(addquotes(geneColors), collapse=","), ")", sep="")
-    setAttributeSVG(node, "onmouseover", paste("displayAnnotation(", paste(jsargs, collapse=", "), ")", sep=""))
-    setAttributeSVG(node, "onmouseout", "hideAnnotation(evt)")
+    addJavaScriptCallBack(node, "onmouseover", paste("displayAnnotation(", paste(jsargs, collapse=", "), ")", sep=""))
+    addJavaScriptCallBack(node, "onmouseout", "hideAnnotation(evt)")
     if (!is.null(annot) && !is.null(annot$url)) {
-      setAttributeSVG(node, "onclick", paste("window.open('", annot$url,  "')", sep=""))
+      node <- addLinkSVG(node, annot$url)
     }
-    return(invisible())
+    return(node)
   }
   if (mode == "fill") {
     if (ncol(numData) < 2) {
-                                        # Simple color fill
+      ## Simple color fill
       for (node in nodes) {
         gene <- xmlGetAttr(node, geneAttribute)
         if (gene %in% rownames(numData)) {
           geneColor <- getGeneColors(gene)
           setStyleSVG(node, "fill", geneColor)
-          addToolTip(node, gene, geneColor)
+          node <- addToolTip(node, gene, geneColor)
         }
       }
     } else {
-                                        # Multi-color fill
+      ## Multi-color fill
       if (is.null(fillAngle))
         fillAngle <- 0
-      defs <- getNodeSet(svg, "//svg:defs")
+      defs <- getNodeSet(svg, "//svg:defs", namespaces=completeNamespaces(svg))
       if (length(defs) == 0) stop("Missing defs node in SVG")
       defs <- defs[[1]]
       for (node in nodes) {
@@ -219,7 +277,12 @@ mapDataSVG <- function(svg, numData, tooltipData=numData,
           gradient <- newXMLNode("linearGradient", attrs=list(id=gradient.id, x1=x1, x2=x2, y1=y1, y2=y2), .children=gradient.children)
           addChildren(defs, kids=list(gradient))
           setStyleSVG(node, "fill", paste("url(#", gradient.id, ")", sep=""))
-          addToolTip(node, gene, geneColors)
+          node <- addToolTip(node, gene, geneColors)
+          # Add animations
+          if (animations) {
+            addJavaScriptCallBack(node, "onmouseover", "animateStripes(evt)")
+            addJavaScriptCallBack(node, "onmouseout", "stopAnimation()")
+          }
         }
       }
     }
@@ -230,7 +293,7 @@ mapDataSVG <- function(svg, numData, tooltipData=numData,
       if (gene %in% rownames(numData)) {
         geneColor <- getGeneColors(gene)
         setStyleSVG(node, "stroke", geneColor)
-        addToolTip(node, gene, geneColor)
+        node <- addToolTip(node, gene, geneColor)
       }
     }
   } else if (mode == "pie") {
@@ -266,6 +329,11 @@ mapDataSVG <- function(svg, numData, tooltipData=numData,
         }
         # ok means we can use this element as a circle to put a pie chart in it
         if (ok) {
+          # Add a <g> element to group the original shape with the pie parts
+          new.group.node <- newXMLNode("g", .children=list(node))
+          new.group.node <- addSibling(node, new.group.node)[[1]]
+          removeNodes(node)
+          node <- xmlChildren(new.group.node)[[1]]
           if ("transform" %in% names(attrs) && grepl("^matrix\\([^\\(]+\\)$", attrs[["transform"]])) {
             appliedTransform = TRUE
             # We are going to apply the transform matrix manually
@@ -286,16 +354,27 @@ mapDataSVG <- function(svg, numData, tooltipData=numData,
             # We will simply copy the transform instruction. (will work if it is a translation)
           }
           # Now build the pie chart
+          pie.node <- newXMLNode("g")
+          addSibling(node, pie.node, after=FALSE)
           for (j in seq(along=geneColors)) {
-            alpharad0 <- if (nconds > 2) -pi/2 else pi/2
+            if (is.null(pieStartAngle)) {
+              alpharad0 <- if (nconds > 2) -pi/2 else pi/2
+            } else {
+              alpharad0 <- pieStartAngle
+            }
             attrs2 <- list(style=paste("stroke-width:0;stroke:none;fill:", geneColors[[j]], sep=""))
-            if (!appliedTransform) {
+            if (!appliedTransform && "transform" %in% names(attrs)) {
               attrs2[["transform"]] <- attrs[["transform"]]
             }
-            xs <- cx + r*cos(alpharad*(j-1) + alpharad0)
-            ys <- cy + r*sin(alpharad*(j-1) + alpharad0)
-            x  <- cx + r*cos(alpharad*j + alpharad0)
-            y  <- cy + r*sin(alpharad*j + alpharad0)
+            if (pieClockwise) {
+              j.in.pie <- j
+            } else {
+              j.in.pie <- nconds - j + 1
+            }
+            xs <- cx + r*cos(alpharad*(j.in.pie-1) + alpharad0)
+            ys <- cy + r*sin(alpharad*(j.in.pie-1) + alpharad0)
+            x  <- cx + r*cos(alpharad*j.in.pie + alpharad0)
+            y  <- cy + r*sin(alpharad*j.in.pie + alpharad0)
             if (nconds > 1) {
               elementType <- "path"
               attrs2[["d"]] <- paste("M ", xs, ",", ys, " A ", r, ",", r, " ", alphadeg,
@@ -307,13 +386,18 @@ mapDataSVG <- function(svg, numData, tooltipData=numData,
               attrs2[["r"]] <- r
             }
             pathNode <- newXMLNode(elementType, attrs=attrs2)
-            addSibling(node, kids=list(pathNode), after=FALSE)
+            addChildren(pie.node, pathNode)
           }
         
           # Make the original circle transparent so the pie chart can be seen
           setStyleSVG(node, "fill-opacity", 0)
           # Add tooltip to the circle
-          addToolTip(node, gene, geneColors)
+          node <- addToolTip(node, gene, geneColors)
+          # Add animations
+          if (animations) {
+            addJavaScriptCallBack(node, "onmouseover", "animatePie(evt)")
+            addJavaScriptCallBack(node, "onmouseout", "stopAnimation()")
+          }
         }
       }
     }
@@ -322,7 +406,7 @@ mapDataSVG <- function(svg, numData, tooltipData=numData,
       gene <- xmlGetAttr(node, geneAttribute)
       if (gene %in% rownames(numData)) {
         geneColor <- getGeneColors(gene)
-        addToolTip(node, gene, geneColor)
+        node <- addToolTip(node, gene, geneColor)
       }
     }
   } else if (mode == "fill-opacity") {
@@ -356,24 +440,28 @@ mapDataSVG <- function(svg, numData, tooltipData=numData,
     if (is.null(fillAngle))
       fillAngle <- -pi / 2
     if (ncol(numData)>1) stop("This mode is not compatible with multiple conditions")
-    defs <- getNodeSet(svg, "//svg:defs")
+    defs <- getNodeSet(svg, "//svg:defs", namespaces=completeNamespaces(svg))
     if (length(defs) == 0) stop("Missing defs node in SVG")
     defs <- defs[[1]]
     for (node in nodes) {
       gene <- xmlGetAttr(node, geneAttribute)
       if (gene %in% rownames(numData)) {
+        # Add a <g> element to group the original shape with the pie parts
+        new.group.node <- newXMLNode("g", .children=list(node))
+        new.group.node <- addSibling(node, new.group.node)[[1]]
+        removeNodes(node)
+        node <- xmlChildren(new.group.node)[[1]]
+        
         geneValue <- getGeneValues(gene)
         if (geneValue > 1) geneValue <- 1
         if (geneValue < 0) geneValue <- 0
-        originalColor <- getStyleSVG(node, "fill")
-        if (is.null(originalColor) || grepl("^url", originalColor))
-          originalColor < "#0000FF"
         gradient.id <- paste(getAttributeSVG(node, "id"), "-gradient", sep="")
+        mask.id <- paste(getAttributeSVG(node, "id"), "-mask", sep="")
         gradient.children <- list()
-        gradient.children[[1]] <- newXMLNode("stop", attrs=list(offset=0, style=paste("stop-color:", originalColor, ";stop-opacity:1", sep="")))
-        gradient.children[[2]] <- newXMLNode("stop", attrs=list(offset=geneValue, style=paste("stop-color:", originalColor, ";stop-opacity:1", sep="")))
-        gradient.children[[3]] <- newXMLNode("stop", attrs=list(offset=geneValue, style=paste("stop-color:", originalColor, ";stop-opacity:0", sep="")))
-        gradient.children[[4]] <- newXMLNode("stop", attrs=list(offset=1, style=paste("stop-color:", originalColor, ";stop-opacity:0", sep="")))
+        gradient.children[[1]] <- newXMLNode("stop", attrs=list(offset=0, style=paste("stop-color:white;stop-opacity:1", sep="")))
+        gradient.children[[2]] <- newXMLNode("stop", attrs=list(offset=geneValue, style=paste("stop-color:white;stop-opacity:1", sep="")))
+        gradient.children[[3]] <- newXMLNode("stop", attrs=list(offset=geneValue, style=paste("stop-color:white;stop-opacity:0", sep="")))
+        gradient.children[[4]] <- newXMLNode("stop", attrs=list(offset=1, style=paste("stop-color:white;stop-opacity:0", sep="")))
         x <- cos(fillAngle)
         y <- sin(fillAngle)
         if (x < 0) {
@@ -396,7 +484,29 @@ mapDataSVG <- function(svg, numData, tooltipData=numData,
         y2 <- paste(round(y2*100), "%", sep="")
         gradient <- newXMLNode("linearGradient", attrs=list(id=gradient.id, x1=x1, x2=x2, y1=y1, y2=y2), .children=gradient.children)
         addChildren(defs, kids=list(gradient))
-        setStyleSVG(node, "fill", paste("url(#", gradient.id, ")", sep=""))
+        
+        # make mask
+        masknode <- newXMLNode("mask", .children=list(node))
+        addSibling(node, masknode, after=FALSE)
+        setAttributeSVG(masknode, "id", mask.id)
+        node.copy.in.mask <- xmlChildren(masknode)[[1]]
+        setStyleSVG(node.copy.in.mask, "fill", paste("url(#", gradient.id, ")", sep=""))
+        removeAttributes(node.copy.in.mask, "id")
+        
+        # make a copy of the node and put it above, so that the stroke is not masked
+        node.copy <- addSibling(node, xmlClone(node), after=FALSE)[[1]]
+        setStyleSVG(node.copy, "fill-opacity", 0)
+        removeAttributes(node.copy, "id")
+        
+        # mask only the original node
+        setAttributeSVG(node, "mask", paste("url(#", mask.id, ")", sep=""))
+        # remove its stroke
+        setStyleSVG(node, "stroke-opacity", 0)
+        
+        if (animations) {
+          addJavaScriptCallBack(node, "onmouseover", "animatePartialFill(evt)")
+          addJavaScriptCallBack(node, "onmouseout", "stopAnimation()")
+        }
       }
     }
   } else {
@@ -405,30 +515,65 @@ mapDataSVG <- function(svg, numData, tooltipData=numData,
   return(invisible())
 }
 
-saveSVG <- function(svg, file="") {
-  ## Add instruction to initialize script when SVG file is loaded
-  root <- xmlRoot(svg)
-  setAttributeSVG(root, "onload", "init(evt)")
+saveSVG <- function(svg, file="", add.script=TRUE) {
+  if (add.script) {
+    ## Add instruction to initialize script when SVG file is loaded
+    root <- xmlRoot(svg)
+    setAttributeSVG(root, "onload", "init(evt)")
+    ## Add the JavaScript script
+    con <- file(system.file("extdata/script.js", package="SVGMapping"), "rb")
+    script.lines <- readLines(con)
+    close(con)
+    script <- paste(script.lines, collapse="\n")
+    addScriptSVG(svg, script, id="SVGMapping-script")
+  }
+  
   ## Produce source XML
   xml <- saveXML(svg, indent=FALSE)
   xml <- gsub("\n</text>","</text>", xml)
   xml <- gsub("\n<tspan","<tspan", xml)
-  ## Add the JavaScript script
-  con <- file(system.file("extdata/script.js", package="SVGMapping"), "rb")
-  rawScript <- readLines(con)
-  close(con)
-  scriptText <- paste('\n<script type="text/ecmascript">\n<![CDATA[\n\n',
-                      paste(rawScript, collapse="\n"),
-                      '\n\n]]>\n</script>\n', sep="")
-  xml <- gsub("</svg>", paste(scriptText, "</svg>", sep=""), xml)
+  
   ## Write/output the SVG
   cat(xml, file=file)
 }
 
-showSVG <- function(svg, browser=getOption("browser")) {
+addScriptSVG <- function(svg, script, id=NULL) {
+  cdata <- newXMLCDataNode(paste("\n", script, "\n", sep=""))
+  script.attrs <- list(type="text/ecmascript")
+  if (!is.null(id)) {
+    script.attrs[["id"]] <- id
+  }
+  scriptnode <- newXMLNode("script", attrs=script.attrs, .children=list(cdata))
+  
+  # Replace a script node if it has the same id
+  replaced <- FALSE
+  if (!is.null(id)) {
+    with.same.id <- getNodeSet(svg, paste("//svg:script[@id=\"", id, "\"]", sep=""), namespaces=completeNamespaces(svg))
+    if (length(with.same.id) > 0) {
+      replaceNodes(with.same.id[[1]], scriptnode)
+      replaced <- TRUE
+    } 
+  }
+  if (!replaced) {
+    addChildren(xmlRoot(svg), kids=list(scriptnode))
+  }
+}
+
+addDefinesSVG <- function(svg, nodes) {
+  defs <- getNodeSet(svg, "//svg:defs", namespaces=completeNamespaces(svg))
+  if (length(defs) == 0) {
+    defs <- newXMLNode("defs")
+    addChildren(xmlRoot(svg), defs)
+  } else {
+    defs <- defs[[1]]
+  }
+  addChildren(defs, nodes)
+}
+
+showSVG <- function(svg, browser=getOption("browser"), add.script=TRUE) {
   path <- tempfile()
   svgpath <- paste(path, ".svg", sep="")
-  saveSVG(svg, svgpath)
+  saveSVG(svg, svgpath, add.script=add.script)
   htmlpath <- paste(path, ".html", sep="")
   con <- file(htmlpath, "w")
   html <- paste('<!DOCTYPE html>

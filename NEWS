@@ -1,3 +1,16 @@
+SVGMApping 1.43
+===============
+
+ * Fix: hyperlink insertion wasn't done properly
+
+SVGMApping 1.42
+===============
+
+ * Add compiled tutorial..
+
+ * Fix: cairoDevice is no longer automatically loaded using require (contrary to
+   the good practice rules)
+
 SVGMApping 1.41
 ===============
 
